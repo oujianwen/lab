@@ -1,7 +1,7 @@
 /* ============================================================
    场景管理 + 预置场景 + 场景切换
    ============================================================ */
-import { uid, W, H } from '../core/state.js';
+import { uid, W, H, S } from '../core/state.js';
 import { ComponentTypes } from './registry.js';
 import { canvas, sceneTabsEl } from '../core/dom.js';
 import { showTip } from '../core/toast.js';
@@ -134,4 +134,26 @@ export function createNewScene() {
     Scenes.push(scene);
     switchToScene(scene.id);
     showTip('新实验已创建，从组件库添加部件吧');
+}
+
+/* ---------- 龟兔赛跑（依赖外部部件，需在部件加载完成后调用） ---------- */
+export function createRaceScene() {
+    const scene = createScene({ name: '龟兔赛跑', icon: '🏁' });
+    const trackY = H * 0.6;
+    const trk = addElement(scene, 'race_track', W * 0.5, trackY);
+    if (trk) { trk.length = Math.min(W * 0.82, 760 * S); trk.started = false; }
+    addElement(scene, 'turtle', W * 0.2, trackY);
+    addElement(scene, 'rabbit', W * 0.2, trackY - 52 * S);
+    return scene;
+}
+export function initRaceScene() {
+    if (!ComponentTypes.race_track || !ComponentTypes.turtle || !ComponentTypes.rabbit) {
+        console.warn('[龟兔赛跑] 部件未就绪，跳过（请确认 manifest 已加载 race_track/turtle/rabbit）');
+        return;
+    }
+    if (Scenes.some(s => s.name === '龟兔赛跑')) return;
+    const s = createRaceScene();
+    Scenes.push(s);
+    switchToScene(s.id);
+    showTip('已加载「龟兔赛跑」实验');
 }

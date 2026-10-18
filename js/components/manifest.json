@@ -8,5 +8,8 @@
   "car.js",
   "ground.js",
   "tele_cup.js",
-  "tele_rope.js"
+  "tele_rope.js",
+  "race_track.js",
+  "turtle.js",
+  "rabbit.js"
 ]

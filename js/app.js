@@ -15,6 +15,7 @@ import {
 } from './engine/plugins.js';
 // 触发内置组件注册（齿轮/杯子/木棍/硬币/眼睛/光源/陀螺），必须在 init() 前执行
 import './components/builtin.js';
+import { initRaceScene } from './engine/scenes.js';
 
 async function init() {
     // 1) 先把 W/H/S/time/showTip/Audio 等挂回 window，
@@ -39,6 +40,9 @@ async function init() {
     // 7) 读取 manifest.json，自动加载 js/components/*.js
     //    带 overwrite，会用文件里的最新版静默覆盖上一步恢复的旧版
     await loadAutoComponents();
+
+    // 8) 部件就绪后，构建依赖外部部件的「龟兔赛跑」预置场景
+    initRaceScene();
 }
 
 init();

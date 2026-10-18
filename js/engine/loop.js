@@ -50,7 +50,7 @@ export function clearSelectionIfInvalid() {
    渲染
    ============================================================ */
 export function buildEnv(scene) {
-    return { ctx, W, H, S, MODULE: 8.5 * S, time, scene, selectedId };
+    return { ctx, W, H, S, MODULE: 8.5 * S, time, scene, selectedId, lastDt: loop._lastDt || 0.016 };
 }
 function drawBackground(scene, env) {
     const c = env.ctx;
@@ -370,6 +370,7 @@ export function loop(t) {
     if (!lastT) lastT = t;
     const dt = Math.min(t - lastT, 50) / 1000;
     lastT = t;
+    loop._lastDt = dt;
     advanceTime(dt);
     const scene = getCurrentScene();
     if (scene) {
