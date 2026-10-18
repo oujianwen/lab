@@ -139,11 +139,9 @@ export function createNewScene() {
 /* ---------- 龟兔赛跑（依赖外部部件，需在部件加载完成后调用） ---------- */
 export function createRaceScene() {
     const scene = createScene({ name: '龟兔赛跑', icon: '🏁' });
-    const trackY = H * 0.66;
-    const trk = addElement(scene, 'race_track', W * 0.5, trackY);
-    if (trk) { trk.started = false; trk.lanes = 2; trk.shape = 'bend'; }
-    addElement(scene, 'turtle', W * 0.2, trackY);
-    addElement(scene, 'rabbit', W * 0.2, trackY - 52 * S);
+    addElement(scene, 'race_track');
+    addElement(scene, 'turtle', W * 0.2, H * 0.5);
+    addElement(scene, 'rabbit', W * 0.2, H * 0.5);
     return scene;
 }
 export function initRaceScene() {
