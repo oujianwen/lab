@@ -66,6 +66,35 @@
         for (let i = 0; i < pts.length; i++) i ? c.lineTo(pts[i].x, pts[i].y) : c.moveTo(pts[i].x, pts[i].y);
     }
 
+    function drawTree(c, x, y, S, size) {
+        size = size || 1;
+        const th = 14 * S * size, cw = 15 * S * size;
+        c.save();
+        c.globalAlpha = 0.2; c.fillStyle = '#000';
+        c.beginPath(); c.ellipse(x, y + 1.5 * S, cw * 0.7, 3.5 * S * size, 0, 0, Math.PI * 2); c.fill();
+        c.globalAlpha = 1;
+        c.fillStyle = '#7a5230';
+        c.fillRect(x - 2.2 * S * size, y - th, 4.4 * S * size, th);
+        const cy = y - th - cw * 0.45;
+        const greens = ['#2f7d44', '#3f9e5a', '#57b96e'];
+        for (let k = 0; k < 3; k++) {
+            const r = cw * (1 - k * 0.16);
+            c.beginPath(); c.arc(x - cw * 0.35 + k * cw * 0.35, cy + (k % 2 ? cw * 0.12 : 0), r, 0, Math.PI * 2);
+            c.fillStyle = greens[k % greens.length]; c.fill();
+        }
+        c.beginPath(); c.arc(x - cw * 0.15, cy - cw * 0.2, cw * 0.42, 0, Math.PI * 2);
+        c.fillStyle = 'rgba(150,220,160,0.55)'; c.fill();
+        c.restore();
+    }
+
+    // 路边树/停靠点：按弧长间隔返回一组 0..1 的参数位置（两侧对称各一棵）
+    function treeStops(path, spacing) {
+        const arr = [];
+        const count = Math.max(1, Math.floor(path.total / spacing));
+        for (let idx = 1; idx < count; idx++) arr.push(idx / count);
+        return arr;
+    }
+
     // ---- 依据形状/拐弯数生成路径点 ----
     function generatePath(el) {
         const w = (typeof W !== 'undefined' && W) ? W : 800;
@@ -113,7 +142,7 @@
             const el = {
                 pts: [], shape: 'wave', bends: 6, lanes: 2, laneGap: 42,
                 started: false, vTort: 0.0085, vHare: 0.12, sleepAt: 0.8, sleepTime: 120,
-                color: '#7fbf6a', _timer: 0, _winner: null, _wasStarted: false
+                color: '#7fbf6a', roadsideTrees: true, _timer: 0, _winner: null, _wasStarted: false
             };
             generatePath(el);
             return el;
@@ -157,7 +186,8 @@
             { key: 'vHare', label: '兔子速度', type: 'number', step: 0.01, min: 0.02, max: 0.5 },
             { key: 'sleepAt', label: '兔子睡觉点', type: 'range', min: 20, max: 95, scale: 100 },
             { key: 'sleepTime', label: '睡觉时长(秒)', type: 'number', step: 5, min: 0, max: 180 },
-            { key: 'color', label: '草地颜色', type: 'color' }
+            { key: 'color', label: '草地颜色', type: 'color' },
+            { key: 'roadsideTrees', label: '路旁树木', type: 'checkbox' }
         ],
 
         onPropertyChange(el, key, value) {
@@ -185,6 +215,16 @@
         const runners = scene.elements.filter(e => (e.type === 'turtle' || e.type === 'rabbit') && !e.__missing);
         const n = runners.length;
 
+        // 兔子要“在有树的位置”睡着 —— 把设置的睡觉点吸附到最近的树下停靠点
+        const spacing = 120 * (env.S || 1);
+        const stops = el.roadsideTrees ? treeStops(path, spacing) : [];
+        let sleepFrac = el.sleepAt || 0.8;
+        if (stops.length) {
+            let best = sleepFrac, bd = Infinity;
+            for (const st of stops) { const d = Math.abs(st - sleepFrac); if (d < bd) { bd = d; best = st; } }
+            sleepFrac = best;
+        }
+
         if (el.started && !el._wasStarted) {
             el._wasStarted = true; el._timer = 0; el._winner = null;
             for (const r of runners) { r._progress = 0; r._slept = false; r._sleepLeft = (el.sleepTime || 0); r._state = 'idle'; }
@@ -202,7 +242,7 @@
                 r._state = r._progress >= 1 ? 'done' : 'stopped';
             } else if (r._progress < 1) {
                 if (r.type === 'rabbit') {
-                    if (r._state !== 'sleep' && !r._slept && r._progress >= (el.sleepAt || 0.8)) {
+                    if (r._state !== 'sleep' && !r._slept && r._progress >= sleepFrac) {
                         r._slept = true; r._state = 'sleep'; r._sleepLeft = (el.sleepTime || 0);
                     }
                     if (r._state === 'sleep') { r._sleepLeft -= dt; if (r._sleepLeft <= 0) r._state = 'run'; }
@@ -238,6 +278,19 @@
         c.strokeStyle = 'rgba(0,0,0,0.22)'; c.lineWidth = 2 * S;
         tracePath(c, polyOffset(path, halfW, 90)); c.stroke();
         tracePath(c, polyOffset(path, -halfW, 90)); c.stroke();
+
+        // 路旁风景树（紧贴路边，与兔子睡觉停靠点同一套位置）
+        if (el.roadsideTrees) {
+            const spacing = 120 * S;
+            const stops = treeStops(path, spacing);
+            const off = halfW + 12 * S;
+            stops.forEach((s, idx) => {
+                const l = offsetAt(path, s, off);
+                const r = offsetAt(path, s, -off);
+                drawTree(c, l.x, l.y, S, 0.85 + ((idx * 37) % 4) * 0.12);
+                drawTree(c, r.x, r.y, S, 0.85 + ((idx * 53) % 4) * 0.12);
+            });
+        }
 
         // 起点线
         const s0 = offsetAt(path, 0, -halfW), s1 = offsetAt(path, 0, halfW);
