@@ -1052,6 +1052,7 @@ function addElement(scene, type, x, y) {
             const dx = x - cx, dy = y - cy;
             el.x1 += dx; el.y1 += dy; el.x2 += dx; el.y2 += dy;
         }
+        else if (def.onPlace) def.onPlace(el, x, y, buildEnv(scene));
     }
     if (type === 'top') el.startTime = scene.time;
     scene.elements.push(el);
@@ -2027,6 +2028,8 @@ function resize() {
                 if (el.x1 != null) { el.x1 *= sx; el.y1 *= sy; el.x2 *= sx; el.y2 *= sy; }
                 if (el.w != null) { el.w *= sx; el.h *= sy; }
                 if (el.r != null) { el.r *= sx; }
+                const def = ComponentTypes[el.type];
+                if (def && def.scale) def.scale(el, sx, sy);
             }
         }
     }

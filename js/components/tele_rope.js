@@ -125,10 +125,20 @@
         color: '#d8b070',
 
         defaults() {
-            return { ax: 260, ay: 320, bx: 720, by: 320, tension: 0.6,
-                material: 'cotton', color: '#d8c8a8', _pulses: [] };
+            const w = (typeof W !== 'undefined' && W) ? W : 800;
+            const h = (typeof H !== 'undefined' && H) ? H : 600;
+            return { ax: w * 0.28, ay: h * 0.42, bx: w * 0.68, by: h * 0.42,
+                tension: 0.6, material: 'cotton', color: '#d8c8a8', _pulses: [] };
         },
 
+        onPlace(el, x, y, env) {
+            const len = Math.min(env.W * 0.5, 460 * (env.S || 1));
+            el.ax = x - len / 2; el.ay = y;
+            el.bx = x + len / 2; el.by = y;
+        },
+        scale(el, sx, sy) {
+            el.ax *= sx; el.ay *= sy; el.bx *= sx; el.by *= sy;
+        },
         getPosition(el) { return { x: (el.ax + el.bx) / 2, y: (el.ay + el.by) / 2 }; },
         setPosition(el, x, y) {
             const p = this.getPosition(el);
@@ -186,6 +196,13 @@
                 for (const el of scene.elements) {
                     if (el.type !== 'tele_rope') continue;
                     if (!Array.isArray(el._pulses)) el._pulses = [];
+
+                    const M = 24 * env.S;
+                    el.ax = Math.min(Math.max(el.ax, M), env.W - M);
+                    el.ay = Math.min(Math.max(el.ay, M), env.H - M);
+                    el.bx = Math.min(Math.max(el.bx, M), env.W - M);
+                    el.by = Math.min(Math.max(el.by, M), env.H - M);
+
                     const cups = scene.elements.filter(c => c.type === 'tele_cup' && !c.__missing);
                     const R = 110 * env.S;
 
