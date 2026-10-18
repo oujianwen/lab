@@ -1370,6 +1370,14 @@ function onPointerMove(e) {
 function onPointerUp(e) {
     if (activePointer !== e.pointerId) return;
     activePointer = null;
+    if (dragging && !draggingHandle && dragStart) {
+        const p = getPos(e);
+        if (Math.hypot(p.x - dragStart.startX, p.y - dragStart.startY) < 6) {
+            const scene = getCurrentScene();
+            const def = ComponentTypes[dragging.type];
+            if (scene && def && def.onTap) def.onTap(dragging, scene, buildEnv(scene));
+        }
+    }
     if (dragging) Audio.drop();
     dragging = null;
     draggingHandle = null;

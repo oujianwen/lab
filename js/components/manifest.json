@@ -3,5 +3,10 @@
   "light_source.js",
   "magnet.js",
   "mirror2.js",
-  "spring.js"
+  "spring.js",
+  "ramp.js",
+  "car.js",
+  "ground.js",
+  "tele_cup.js",
+  "tele_rope.js"
 ]
