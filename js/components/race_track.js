@@ -252,6 +252,9 @@
             }
             const pos = offsetAt(path, Math.max(0, Math.min(1, r._progress)), lateral);
             r.x = pos.x; r.y = pos.y;
+            // 头朝行进方向：切线 = (normal.y, -normal.x)，随弯道实时转向
+            const sp = sampleAt(path, Math.max(0, Math.min(1, r._progress)));
+            r._angle = Math.atan2(-sp.nx, sp.ny);
         });
         void laneCount;
     }

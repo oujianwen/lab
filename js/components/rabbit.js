@@ -48,6 +48,8 @@
                 c.beginPath(); c.ellipse(0, h * 0.5 - hop, w * 0.45, 5 * S * size, 0, 0, Math.PI * 2); c.fill();
                 c.globalAlpha = 1;
 
+                c.rotate(el._angle || 0);
+
                 const bodyC = el.color, dark = mix(el.color, '#000', 0.22), pink = '#f4a7bb';
 
                 // 后腿 / 身体

@@ -47,6 +47,8 @@
                 c.beginPath(); c.ellipse(0, h * 0.5, w * 0.5, 5 * S * size, 0, 0, Math.PI * 2); c.fill();
                 c.globalAlpha = 1;
 
+                c.rotate(el._angle || 0);
+
                 // 腿
                 const lp = run ? Math.sin(time * 12) * 5 * S * size : 0;
                 c.fillStyle = mix(el.color, '#000000', 0.25);
