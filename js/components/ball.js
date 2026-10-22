@@ -47,6 +47,87 @@
       Math.round(A[k] + (B[k] - A[k]) * t).toString(16).padStart(2, '0')).join('');
   }
 
+  /* ============================================================
+     浮力物理：阿基米德原理 + 球缺浸入体积 + 重力/阻力积分
+     ------------------------------------------------------------
+     设计原则：与"挡光阴影"完全解耦，只有当球开启 floating 时才介入运动，
+     保证既有光学实验（球静止挡光）不受任何影响。
+     ============================================================ */
+  const GRAVITY = 900; // 像素重力加速度，与 car.js 保持同一尺度
+
+  /* 找到球所处的那杯水：球心水平落在杯子宽度范围内即认为在该水中 */
+  function findWater(el, cups) {
+    for (const cup of cups) {
+      if (el.x >= cup.x && el.x <= cup.x + cup.w) {
+        return {
+          cup,
+          waterY: cup.y + cup.h * (1 - cup.waterLevel * 0.92), // 水面 y（与折射场景一致）
+          bottomY: cup.y + cup.h                                // 杯底 y
+        };
+      }
+    }
+    return null;
+  }
+
+  /* 球体浸入水中的体积比例：用水面与球的相对位置，按球缺体积公式精确求解
+     V_球缺 = πh²(3r-h)/3，V_球 = 4/3·πr³  →  比例 = h²(3r-h)/(4r³) */
+  function submergedFraction(el, waterY) {
+    const r = el.r;
+    const top = el.y - r, bottom = el.y + r;
+    if (waterY <= top) return 1;    // 整球没入水面以下
+    if (waterY >= bottom) return 0; // 整球在水面以上
+    const h = bottom - waterY;      // 从球底到水面的浸入高度
+    return (h * h * (3 * r - h)) / (4 * r * r * r);
+  }
+
+  /* 求球能停下来的支撑面（球心 y 上限）：杯底 / 地面 / 画布底，取最近的一个 */
+  function supportFloor(el, cups, grounds, env) {
+    let surface = env.H; // 默认画布底
+    for (const cup of cups) {
+      if (el.x >= cup.x && el.x <= cup.x + cup.w) {
+        const s = cup.y + cup.h;
+        if (s >= el.y && s < surface) surface = s;
+      }
+    }
+    for (const g of grounds) {
+      if (el.x >= g.x - g.length / 2 && el.x <= g.x + g.length / 2) {
+        const s = g.y;
+        if (s >= el.y && s < surface) surface = s;
+      }
+    }
+    return surface - el.r;
+  }
+
+  /* 每个子步的受力积分：加速度 = g·(1 − 浸入比例/密度)
+     密度 d<1 → 部分浸入时加速度为 0 达到漂浮平衡（浸入比正好等于 d）
+     密度 d>1 → 完全浸没仍向下 → 沉底；水阻力让球晃动几下后稳定 */
+  function integrateBuoyancy(el, cups, grounds, dt, env) {
+    // 刚被拖动/放置的一小段时间内冻结物理，方便用户先把球摆到水面上方
+    if (performance.now() - (el._setTime || 0) < 80) return;
+
+    const d = Math.max(0.05, el.density || 0.6);
+    const water = findWater(el, cups);
+    const floorCenter = supportFloor(el, cups, grounds, env);
+
+    const steps = Math.min(8, Math.max(1, Math.ceil(dt / 0.016)));
+    const sdt = dt / steps;
+
+    for (let s = 0; s < steps; s++) {
+      const frac = water ? submergedFraction(el, water.waterY) : 0;
+      const a = GRAVITY * (1 - frac / d);
+      el._vy += a * sdt;
+      if (frac > 0) el._vy *= Math.max(0, 1 - 3.2 * sdt); // 入水阻尼
+      el.y += el._vy * sdt;
+
+      if (el.y >= floorCenter) { el.y = floorCenter; if (el._vy > 0) el._vy = 0; }
+      if (el.y <= el.r) { el.y = el.r; if (el._vy < 0) el._vy = 0; }
+    }
+
+    el._waterY = water ? water.waterY : null;
+    el._submerged = water ? submergedFraction(el, water.waterY) : 0;
+    el._inWater = el._submerged > 0.001;
+  }
+
   /**
    * 计算单个光源照射下，球投射到地面线上的阴影区间（本影近似）。
    * @param {object} light 光源元素，读取 x/y/angle/beamSpread/intensity
@@ -125,18 +206,27 @@
         x: 400, y: 280,
         r: 45,
         color: '#ff6b8a',
-        groundOffset: 22,   // 地面距画布底部的百分比，决定地面线高度
-        _shadows: [],       // 本帧阴影区间列表
-        _groundY: 0,        // 本帧地面 y 坐标
-        _hint: '',          // 操作提示文案
-        _litFrom: null      // 最强照亮光源引用
+        groundOffset: 22,
+        density: 0.6,        // 相对水的密度（水=1）：<1 漂浮，>1 下沉
+        floating: false,     // 是否放入水中（开启后球才受重力+浮力）
+        _shadows: [],
+        _groundY: 0,
+        _hint: '',
+        _litFrom: null,
+        _vy: 0,              // 竖直速度（浮力物理用）
+        _setTime: 0,         // 最近一次被拖动/放置的时间戳（冻结物理用）
+        _waterY: null,       // 当前所处水面 y（渲染吃水线用）
+        _submerged: 0,       // 当前浸入体积比例
+        _inWater: false
       };
     },
 
-    // 拖拽/序列化用的位置读写接口
     getPosition(el) { return { x: el.x, y: el.y }; },
-    setPosition(el, x, y) { el.x = x; el.y = y; },
-    // 命中/选择半径：球半径外加一定余量（随缩放 S 变化），便于点选
+    setPosition(el, x, y) {
+      el.x = x; el.y = y;
+      el._vy = 0;                         // 拖动即时速度清零
+      el._setTime = performance.now();    // 记录放置时刻，短暂冻结物理
+    },
     getRadius(el, env) { return el.r + 12 * (env && env.S ? env.S : 1); },
 
     // 属性面板配置；groundOffset 用 range 控件，scale:1 表示面板值即真实值
@@ -145,7 +235,9 @@
       { key: 'y', label: 'Y', type: 'number' },
       { key: 'r', label: '半径', type: 'number', min: 10, max: 200 },
       { key: 'color', label: '颜色', type: 'color' },
-      { key: 'groundOffset', label: '地面距底%', type: 'range', min: 5, max: 60, scale: 1 }
+      { key: 'groundOffset', label: '地面距底%', type: 'range', min: 5, max: 60, scale: 1 },
+      { key: 'density', label: '密度(水=1)', type: 'range', min: 5, max: 250, scale: 100 },
+      { key: 'floating', label: '放入水中(浮力)', type: 'checkbox' }
     ],
 
     /**
@@ -165,6 +257,8 @@
         const lights = scene.elements.filter(e =>
           (e.type === 'light' || e.type === 'light_source') && !e.__missing
         );
+        const cups = scene.elements.filter(e => e.type === 'cup' && e.waterLevel > 0.01 && !e.__missing);
+        const grounds = scene.elements.filter(e => e.type === 'ground' && !e.__missing);
         for (const el of scene.elements) {
           if (el.type !== 'ball') continue;
           const groundY = env.H * (1 - (el.groundOffset || 22) / 100);
@@ -240,6 +334,12 @@
           }
           el._litFrom = bestLight;
           el._shadows = shadows;
+        }
+
+        // ===== 浮力物理：独立于上面的阴影计算，仅对开启 floating 的球积分 =====
+        for (const el of scene.elements) {
+          if (el.type !== 'ball' || !el.floating) continue;
+          integrateBuoyancy(el, cups, grounds, dt, env);
         }
       }
     },
@@ -352,6 +452,41 @@
           c.fillText(text, el.x, by + bh / 2 + 1);
         }
 
+        c.restore();
+      },
+
+      /* 前层叠加：水面以下的部分蒙一层半透明水色并画出吃水线，
+         让孩子直观看到球"浸入多少"，只在水中对开启浮力的球生效 */
+      front(el, scene, env) {
+        if (!el.floating || !el._inWater || el._waterY == null) return;
+        const c = env.ctx;
+        const S = env.S;
+        const r = el.r;
+        const waterY = el._waterY;
+        const top = el.y - r, bottom = el.y + r;
+        if (waterY >= bottom || waterY <= top) return;
+
+        // 水下部分：裁剪到球圆内，填充上浅下深的水色渐变
+        c.save();
+        c.beginPath();
+        c.arc(el.x, el.y, r, 0, Math.PI * 2);
+        c.clip();
+        const wg = c.createLinearGradient(0, waterY, 0, bottom);
+        wg.addColorStop(0, 'rgba(90,170,235,0.30)');
+        wg.addColorStop(1, 'rgba(30,110,190,0.55)');
+        c.fillStyle = wg;
+        c.fillRect(el.x - r, waterY, r * 2, bottom - waterY);
+        c.restore();
+
+        // 吃水线：水面与球相交的弦
+        const halfW = Math.sqrt(Math.max(0, r * r - (waterY - el.y) * (waterY - el.y)));
+        c.save();
+        c.strokeStyle = 'rgba(220,245,255,0.9)';
+        c.lineWidth = 2 * S;
+        c.beginPath();
+        c.moveTo(el.x - halfW, waterY);
+        c.lineTo(el.x + halfW, waterY);
+        c.stroke();
         c.restore();
       }
     }
