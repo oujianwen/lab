@@ -1,315 +1,357 @@
+/**
+ * 圆球组件（ball）
+ * ------------------------------------------------------------------
+ * 模块概述：
+ *   本文件以 IIFE 立即执行函数的形式返回一个「圆球」部件描述对象，供部件
+ *   注册器（registry）加载。球被归类为光学（optical）部件，其主要职责是：
+ *     - 接收场景中一个或多个光源（light / light_source）的照射；
+ *     - 依据光源与球的相对位置、朝向和强度，计算球投射到地面上的阴影区间；
+ *     - 根据最强光源方向在球面绘制高光，形成明暗立体感；
+ *     - 当光照条件不满足（如无光源、光源未在球上方、方向未朝向球）时，
+ *       通过 _hint 提示文案引导用户调整，并给出兜底的近似阴影。
+ *
+ * 关键内部状态（由 system.update 每帧写入，供 render 读取）：
+ *   - _shadows：本帧计算出的阴影区间数组 [{x1,x2,y,alpha}]；
+ *   - _groundY：当前地面线的 y 坐标；
+ *   - _hint：需要展示给用户的操作提示文案（空串表示不显示）；
+ *   - _litFrom：本帧中"最强"的照亮光源引用，用于确定球面高光方向。
+ *
+ * 说明：颜色处理与阴影计算的辅助函数均封闭在 IIFE 内部，避免污染全局；
+ *   末尾 IIFE 结尾不使用分号，遵循项目外部部件文件的统一格式约定。
+ */
 (function () {
+  /**
+   * 将十六进制颜色字符串解析为 RGB 分量对象。
+   * @param {string} hex 形如 '#ff6b8a' 或 '#fff' 的颜色串，允许省略前缀 '#'
+   * @returns {{r:number,g:number,b:number}} RGB 分量（0~255）
+   * 实现逻辑：去除 '#'；3 位简写逐位扩展为 6 位；按 16 进制解析后位移拆分为
+   *   r/g/b。解析失败时回退为默认粉红色，保证渲染不崩溃。
+   */
   function parseColor(hex) {
-    let s = (hex || '#ffe27a').replace('#', '');
+    let s = (hex || '#ff6b8a').replace('#', '');
     if (s.length === 3) s = s.split('').map(c => c + c).join('');
     const n = parseInt(s, 16);
-    if (isNaN(n)) return { r: 255, g: 226, b: 122 };
+    if (isNaN(n)) return { r: 255, g: 107, b: 138 };
     return { r: (n >> 16) & 255, g: (n >> 8) & 255, b: n & 255 };
   }
-  function hexA(hex, a) {
-    const c = parseColor(hex);
-    return `rgba(${c.r},${c.g},${c.b},${Math.max(0, Math.min(1, a))})`;
-  }
+  /**
+   * 在两个十六进制颜色之间做线性插值（混色）。
+   * @param {string} a 起始颜色  @param {string} b 目标颜色
+   * @param {number} t 插值系数 [0,1]
+   * @returns {string} 混合后的 '#rrggbb' 颜色串
+   * 用途：球体渐变通过向白/黑混色来表现高光与暗部。
+   */
   function mixHex(a, b, t) {
     const A = parseColor(a), B = parseColor(b);
     return '#' + ['r','g','b'].map(k =>
       Math.round(A[k] + (B[k] - A[k]) * t).toString(16).padStart(2, '0')).join('');
   }
-  function mirrorSeg(m) {
-    const h = (m.length || 0) / 2;
-    const c = Math.cos(m.angle || 0);
-    const s = Math.sin(m.angle || 0);
-    return {
-      a: { x: m.x - c * h, y: m.y - s * h },
-      b: { x: m.x + c * h, y: m.y + s * h }
-    };
-  }
-  function raySegmentIntersect(ox, oy, dx, dy, a, b) {
-    const ex = b.x - a.x, ey = b.y - a.y;
-    const denom = dx * ey - dy * ex;
-    if (Math.abs(denom) < 0.0001) return null;
-    const tx = a.x - ox, ty = a.y - oy;
-    const t = (tx * ey - ty * ex) / denom;
-    const s = (tx * dy - ty * dx) / denom;
-    if (t < 0.001 || s < 0 || s > 1) return null;
-    return { x: ox + t * dx, y: oy + t * dy, dist: t };
-  }
-  /* 射线与圆求交 */
-  function rayCircleIntersect(ox, oy, dx, dy, cx, cy, r) {
-    const ox2 = ox - cx, oy2 = oy - cy;
-    const b = ox2 * dx + oy2 * dy;
-    const c = ox2 * ox2 + oy2 * oy2 - r * r;
-    const disc = b * b - c;
-    if (disc < 0) return null;
-    const sq = Math.sqrt(disc);
-    const t1 = -b - sq;
-    const t2 = -b + sq;
-    let t = null;
-    if (t1 > 0.001) t = t1;
-    else if (t2 > 0.001) t = t2;
-    if (t == null) return null;
-    return { x: ox + t * dx, y: oy + t * dy, dist: t };
-  }
 
-  /* ---------- 光线追踪：检测镜子 + 球 ---------- */
-  function traceRays(el, mirrors, balls) {
-    const rays = [];
-    const beamLength = el.beamLength || 500;
-    const spreads = (el.beamSpread || 0) > 0 ? 15 : 1;
-    const halfSpread = ((el.beamSpread || 0) * Math.PI / 180) / 2;
-    const baseAngle = el.angle || 0;
+  /**
+   * 计算单个光源照射下，球投射到地面线上的阴影区间（本影近似）。
+   * @param {object} light 光源元素，读取 x/y/angle/beamSpread/intensity
+   * @param {object} ball 球元素，读取 x/y/r
+   * @param {number} groundY 地面线的 y 坐标
+   * @returns {null|{x1:number,x2:number,y:number,alpha:number}}
+   *          阴影区间（地面上的左右端点、y、不透明度）；条件不满足时返回 null
+   *
+   * 实现逻辑与前置剔除：
+   *   1. 光源必须在地面之上、且明显高于球，否则无法形成向下投影；
+   *   2. 光源到球心距离需大于球半径（避免陷入球体内）；
+   *   3. 若光源为定向光束（发散角 < 90°），用向量点积做宽松的"朝向球"检查；
+   *   4. 以光源向球作两条切线（切线夹角 alpha = asin(r/d)），分别求其与地面
+   *      的交点横坐标，得到阴影的左右端点 x1、x2；
+   *   5. 阴影不透明度随光源强度增大而增强（上限 0.9）。
+   * 设计意图：用几何切线投影近似真实本影，成本低且视觉上足够直观。
+   */
+  function computeShadow(light, ball, groundY) {
+    const lx = light.x, ly = light.y;
+    const cx = ball.x, cy = ball.y;
+    const r = ball.r;
 
-    for (let i = 0; i < spreads; i++) {
-      const t = spreads === 1 ? 0 : (i / (spreads - 1) - 0.5);
-      const a = baseAngle + t * halfSpread;
-      const dx = Math.cos(a), dy = Math.sin(a);
+    if (ly >= groundY - 2) return null;
+    if (ly >= cy - r * 0.1) return null;  // 光源必须明显高于球
 
-      let best = null, bestDist = beamLength, bestType = null;
+    const dx = cx - lx, dy = cy - ly;
+    const d = Math.hypot(dx, dy);
+    if (d <= r * 1.05) return null;
 
-      // 检测镜子
-      for (const m of mirrors) {
-        const seg = mirrorSeg(m);
-        const hit = raySegmentIntersect(el.x, el.y, dx, dy, seg.a, seg.b);
-        if (hit && hit.dist < bestDist) {
-          bestDist = hit.dist;
-          best = { hit, mirror: m };
-          bestType = 'mirror';
-        }
-      }
-      // 检测球（球会挡住光）
-      for (const b of balls) {
-        const hit = rayCircleIntersect(el.x, el.y, dx, dy, b.x, b.y, b.r);
-        if (hit && hit.dist < bestDist) {
-          bestDist = hit.dist;
-          best = { hit, ball: b };
-          bestType = 'ball';
-        }
-      }
-
-      if (bestType === 'mirror') {
-        const nx = -Math.sin(best.mirror.angle || 0);
-        const ny = Math.cos(best.mirror.angle || 0);
-        const dot = dx * nx + dy * ny;
-        const rdx = dx - 2 * dot * nx;
-        const rdy = dy - 2 * dot * ny;
-        const remain = Math.max(100, beamLength - bestDist);
-        rays.push({
-          origin: { x: el.x, y: el.y },
-          hit: { x: best.hit.x, y: best.hit.y },
-          hitMirror: best.mirror,
-          hitBall: null,
-          refEnd: { x: best.hit.x + rdx * remain, y: best.hit.y + rdy * remain }
-        });
-      } else if (bestType === 'ball') {
-        // 打到球上：光被遮挡，不延伸
-        rays.push({
-          origin: { x: el.x, y: el.y },
-          hit: { x: best.hit.x, y: best.hit.y },
-          hitMirror: null,
-          hitBall: best.ball,
-          refEnd: null
-        });
-      } else {
-        rays.push({
-          origin: { x: el.x, y: el.y },
-          hit: { x: el.x + dx * beamLength, y: el.y + dy * beamLength },
-          hitMirror: null,
-          hitBall: null,
-          refEnd: null
-        });
-      }
+    // 光源方向检查（宽松一点，只要大致朝向球即可）
+    const spread = (light.beamSpread || 0) * Math.PI / 180;
+    if (spread < Math.PI / 2) {
+      const ldx = Math.cos(light.angle || 0);
+      const ldy = Math.sin(light.angle || 0);
+      const toBallX = cx - lx;
+      const toBallY = cy - ly;
+      const dot = (toBallX * ldx + toBallY * ldy) / d;
+      const cosHalf = Math.cos(spread / 2 + 0.35);
+      if (dot < cosHalf) return null;
     }
-    return rays;
+
+    const baseAngle = Math.atan2(dy, dx);
+    const alpha = Math.asin(Math.min(1, r / d));
+
+    const hits = [];
+    for (const da of [-alpha, alpha]) {
+      const a = baseAngle + da;
+      const sA = Math.sin(a);
+      if (Math.abs(sA) < 0.001) continue;
+      const t = (groundY - ly) / sA;
+      if (t <= 0) continue;
+      hits.push(lx + Math.cos(a) * t);
+    }
+    if (hits.length < 2) return null;
+
+    const x1 = Math.min(hits[0], hits[1]);
+    const x2 = Math.max(hits[0], hits[1]);
+    if (x2 - x1 < 2) return null;
+
+    const intensity = light.intensity ?? 1;
+    const alpha2 = Math.min(0.9, 0.35 + 0.55 * Math.min(intensity, 1.2));
+    return { x1, x2, y: groundY, alpha: alpha2 };
   }
 
   return {
-    type: 'light_source',
-    label: '光源',
-    icon: '💡',
+    // 组件元数据：类型标识、显示名称、图标、分类（光学）、主题色
+    type: 'ball',
+    label: '圆球',
+    icon: '🔴',
     category: 'optical',
-    color: '#ffe27a',
+    color: '#ff6b8a',
 
+    /** 新建球时的默认属性：位置、半径、颜色、地面距底百分比，以及各内部状态字段 */
     defaults() {
       return {
-        x: 200, y: 200,
-        angle: -Math.PI / 4,
-        color: '#ffe27a',
-        intensity: 1.0,
-        beamSpread: 20,
-        beamLength: 500,
-        showBeam: true,
-        showRays: true,
-        _pulse: 0,
-        _rays: []
+        x: 400, y: 280,
+        r: 45,
+        color: '#ff6b8a',
+        groundOffset: 22,   // 地面距画布底部的百分比，决定地面线高度
+        _shadows: [],       // 本帧阴影区间列表
+        _groundY: 0,        // 本帧地面 y 坐标
+        _hint: '',          // 操作提示文案
+        _litFrom: null      // 最强照亮光源引用
       };
     },
 
+    // 拖拽/序列化用的位置读写接口
     getPosition(el) { return { x: el.x, y: el.y }; },
     setPosition(el, x, y) { el.x = x; el.y = y; },
-    getRadius(el, env) { return 32 * (env && env.S ? env.S : 1); },
+    // 命中/选择半径：球半径外加一定余量（随缩放 S 变化），便于点选
+    getRadius(el, env) { return el.r + 12 * (env && env.S ? env.S : 1); },
 
-    getHandles(el, env) {
-      const S = (env && env.S) ? env.S : 1;
-      const r = 48 * S;
-      return [{
-        id: 'dir',
-        x: el.x + Math.cos(el.angle) * r,
-        y: el.y + Math.sin(el.angle) * r
-      }];
-    },
-    onHandleDrag(el, handleId, p) {
-      if (handleId !== 'dir') return;
-      const dx = p.x - el.x;
-      const dy = p.y - el.y;
-      if (Math.abs(dx) > 1 || Math.abs(dy) > 1) el.angle = Math.atan2(dy, dx);
-    },
-
+    // 属性面板配置；groundOffset 用 range 控件，scale:1 表示面板值即真实值
     properties: [
       { key: 'x', label: 'X', type: 'number' },
       { key: 'y', label: 'Y', type: 'number' },
-      { key: 'angle', label: '方向°', type: 'number', step: 5, radians: true },
-      { key: 'intensity', label: '强度', type: 'range', min: 10, max: 200, scale: 100 },
-      { key: 'beamSpread', label: '发散°', type: 'number', step: 1, min: 0, max: 180 },
-      { key: 'beamLength', label: '射程', type: 'number', min: 50, max: 2000 },
+      { key: 'r', label: '半径', type: 'number', min: 10, max: 200 },
       { key: 'color', label: '颜色', type: 'color' },
-      { key: 'showBeam', label: '显示光束', type: 'checkbox' },
-      { key: 'showRays', label: '显示反射', type: 'checkbox' }
+      { key: 'groundOffset', label: '地面距底%', type: 'range', min: 5, max: 60, scale: 1 }
     ],
 
+    /**
+     * 系统级更新：每帧被引擎调用，为每个球重算阴影、提示与主光源。
+     * 流程：
+     *   1. 先按 groundOffset 换算出地面线 y 坐标；
+     *   2. 无光源则清空并提示放置光源；
+     *   3. 遍历所有光源：记录是否有光源位于球上方(anyAbove)、是否有光源
+     *      朝向球(anyAimed)，并调用 computeShadow 收集有效阴影；
+     *   4. 若没有任何精确阴影，则依据缺失条件给出对应提示，或在位置和方向
+     *      大致成立时兜底画一个近似阴影；
+     *   5. 将阴影端点裁剪到画面范围（略留 50 边距）；
+     *   6. 按 强度/距离 评分选出最强照亮光源（需在球上方），用于球面高光。
+     */
     system: {
       update(scene, dt, env) {
-        const mirrors = scene.elements.filter(e => e.type === 'mirror' && !e.__missing);
-        const balls = scene.elements.filter(e => e.type === 'ball' && !e.__missing);
+        const lights = scene.elements.filter(e =>
+          (e.type === 'light' || e.type === 'light_source') && !e.__missing
+        );
         for (const el of scene.elements) {
-          if (el.type !== 'light_source') continue;
-          el._pulse = (el._pulse || 0) + dt * 2;
-          el._rays = traceRays(el, mirrors, balls);
+          if (el.type !== 'ball') continue;
+          const groundY = env.H * (1 - (el.groundOffset || 22) / 100);
+          el._groundY = groundY;
+
+          if (!lights.length) {
+            el._shadows = [];
+            el._hint = '没有光源，请先放置💡';
+            el._litFrom = null;
+            continue;
+          }
+
+          const shadows = [];
+          let preciseCount = 0;
+          let anyAbove = false;
+          let anyAimed = false;
+
+          for (const light of lights) {
+            if (light.y < el.y - el.r * 0.1) anyAbove = true;
+            // 方向检查
+            const spread = (light.beamSpread || 0) * Math.PI / 180;
+            if (spread >= Math.PI / 2) {
+              anyAimed = true;
+            } else {
+              const ldx = Math.cos(light.angle || 0);
+              const ldy = Math.sin(light.angle || 0);
+              const toX = el.x - light.x;
+              const toY = el.y - light.y;
+              const d = Math.hypot(toX, toY) || 1;
+              if ((toX * ldx + toY * ldy) / d > Math.cos(spread / 2 + 0.35)) {
+                anyAimed = true;
+              }
+            }
+            const s = computeShadow(light, el, groundY);
+            if (s) { shadows.push(s); preciseCount++; }
+          }
+
+          if (preciseCount === 0) {
+            if (!anyAbove) {
+              el._hint = '↑ 把光源拖到球的上方（y更小）';
+            } else if (!anyAimed) {
+              el._hint = '↻ 调整光源方向，让它照向球';
+            } else {
+              // 位置和方向大致对，给个兜底影子保证看得见
+              shadows.push({
+                x1: el.x - el.r * 1.5,
+                x2: el.x + el.r * 1.5,
+                y: groundY,
+                alpha: 0.28
+              });
+              el._hint = '≈ 光源偏离较远，效果近似';
+            }
+          } else {
+            el._hint = '';
+          }
+
+          for (const s of shadows) {
+            s.x1 = Math.max(-50, s.x1);
+            s.x2 = Math.min(env.W + 50, s.x2);
+          }
+
+          // 找最强的照亮光源，用于球体高光
+          let bestLight = null, bestScore = 0;
+          for (const light of lights) {
+            const toX = el.x - light.x;
+            const toY = el.y - light.y;
+            const d = Math.hypot(toX, toY) || 1;
+            const score = (light.intensity || 1) / d;
+            if (score > bestScore && light.y < el.y) {
+              bestScore = score;
+              bestLight = light;
+            }
+          }
+          el._litFrom = bestLight;
+          el._shadows = shadows;
         }
       }
     },
 
     render: {
-      main(el, scene, env) {
+      /**
+       * 背景层渲染（先于球体绘制）：
+       *   1. 绘制地面——从地面线到画布底部的垂直渐变填充，并描一条地面高亮线；
+       *   2. 绘制每个阴影——以阴影区间为直径，在地面线上画椭圆径向渐变，
+       *      中心最暗、边缘透明，模拟柔和的本影。
+       */
+      back(el, scene, env) {
         const c = env.ctx;
-        const S = (env && env.S) ? env.S : 1;
-        const intensity = el.intensity ?? 1;
-        const pulse = 0.5 + 0.5 * Math.sin(el._pulse || 0);
-        const rays = Array.isArray(el._rays) ? el._rays : [];
+        const S = env.S;
+        const groundY = el._groundY || (env.H * 0.78);
 
-        // 1. 光束：到第一个交点（镜面 / 球 / 射程）
-        if (el.showBeam && rays.length) {
-          c.save();
-          if (rays.length === 1) {
-            const r = rays[0];
-            const lineGrad = c.createLinearGradient(r.origin.x, r.origin.y, r.hit.x, r.hit.y);
-            lineGrad.addColorStop(0, hexA(el.color, 0.75 * intensity));
-            lineGrad.addColorStop(0.5, hexA(el.color, 0.32 * intensity));
-            lineGrad.addColorStop(1, hexA(el.color, 0.05 * intensity));
-            c.strokeStyle = lineGrad;
-            c.lineWidth = 2.5 * S;
-            c.lineCap = 'round';
-            c.beginPath();
-            c.moveTo(r.origin.x, r.origin.y);
-            c.lineTo(r.hit.x, r.hit.y);
-            c.stroke();
-          } else {
-            // 扇形光束：多边形，顶点在光源，边缘落在各条 hit 点
-            // 因为部分 hit 打在球上（距离短），多边形自然在球的位置"凹进去"
-            const maxR = Math.max(...rays.map(r =>
-              Math.hypot(r.hit.x - el.x, r.hit.y - el.y)));
-            const fanGrad = c.createRadialGradient(el.x, el.y, 0, el.x, el.y, Math.max(30, maxR));
-            fanGrad.addColorStop(0, hexA(el.color, 0.42 * intensity));
-            fanGrad.addColorStop(0.7, hexA(el.color, 0.15 * intensity));
-            fanGrad.addColorStop(1, hexA(el.color, 0.02 * intensity));
-            c.fillStyle = fanGrad;
-            c.beginPath();
-            c.moveTo(rays[0].origin.x, rays[0].origin.y);
-            for (const r of rays) c.lineTo(r.hit.x, r.hit.y);
-            c.closePath();
-            c.fill();
-          }
-          c.restore();
-        }
-
-        // 2. 反射（球不反射，只有镜子反射）
-        if (el.showRays && rays.length) {
-          c.save();
-          for (const r of rays) {
-            if (!r.hitMirror || !r.refEnd) continue;
-            if (!el.showBeam) {
-              c.strokeStyle = hexA(el.color, 0.35 * intensity);
-              c.lineWidth = 1.2 * S;
-              c.setLineDash([4 * S, 4 * S]);
-              c.beginPath();
-              c.moveTo(r.origin.x, r.origin.y);
-              c.lineTo(r.hit.x, r.hit.y);
-              c.stroke();
-              c.setLineDash([]);
-            }
-            c.strokeStyle = hexA(el.color, 0.55 * intensity);
-            c.lineWidth = 1.6 * S;
-            c.beginPath();
-            c.moveTo(r.hit.x, r.hit.y);
-            c.lineTo(r.refEnd.x, r.refEnd.y);
-            c.stroke();
-            c.beginPath();
-            c.arc(r.hit.x, r.hit.y, 3.5 * S, 0, Math.PI * 2);
-            c.fillStyle = hexA(el.color, 0.95);
-            c.fill();
-            c.strokeStyle = 'rgba(255,255,255,0.7)';
-            c.lineWidth = 1 * S;
-            c.stroke();
-          }
-          c.restore();
-        }
-
-        // 3. 光晕
-        const glowR = 34 * S * (1 + 0.12 * pulse) * Math.max(0.6, intensity);
-        const glow = c.createRadialGradient(el.x, el.y, 0, el.x, el.y, glowR);
-        glow.addColorStop(0, hexA(el.color, 0.9 * intensity));
-        glow.addColorStop(0.35, hexA(el.color, 0.35 * intensity));
-        glow.addColorStop(1, hexA(el.color, 0));
-        c.fillStyle = glow;
-        c.beginPath();
-        c.arc(el.x, el.y, glowR, 0, Math.PI * 2);
-        c.fill();
-
-        // 4. 核心
         c.save();
-        c.beginPath();
-        c.arc(el.x, el.y, 9 * S, 0, Math.PI * 2);
-        c.fillStyle = mixHex(el.color, '#ffffff', 0.55);
-        c.fill();
-        c.strokeStyle = hexA('#ffffff', 0.85);
+        const g = c.createLinearGradient(0, groundY, 0, env.H);
+        g.addColorStop(0, 'rgba(40, 50, 80, 0.55)');
+        g.addColorStop(1, 'rgba(10, 15, 30, 0.85)');
+        c.fillStyle = g;
+        c.fillRect(0, groundY, env.W, env.H - groundY);
+        c.strokeStyle = 'rgba(120, 160, 240, 0.35)';
         c.lineWidth = 1.5 * S;
-        c.stroke();
         c.beginPath();
-        c.arc(el.x - 2 * S, el.y - 2 * S, 3 * S, 0, Math.PI * 2);
-        c.fillStyle = hexA('#ffffff', 0.9);
-        c.fill();
+        c.moveTo(0, groundY);
+        c.lineTo(env.W, groundY);
+        c.stroke();
         c.restore();
 
-        // 5. 方向箭头
-        const ax = el.x + Math.cos(el.angle) * 22 * S;
-        const ay = el.y + Math.sin(el.angle) * 22 * S;
+        for (const sh of el._shadows || []) {
+          const cx = (sh.x1 + sh.x2) / 2;
+          const w = Math.max(30 * S, sh.x2 - sh.x1);
+          c.save();
+          const grd = c.createRadialGradient(cx, groundY, 0, cx, groundY, w / 2);
+          grd.addColorStop(0, `rgba(0,0,0,${sh.alpha})`);
+          grd.addColorStop(0.7, `rgba(0,0,0,${sh.alpha * 0.65})`);
+          grd.addColorStop(1, 'rgba(0,0,0,0)');
+          c.fillStyle = grd;
+          c.beginPath();
+          c.ellipse(cx, groundY, w / 2, Math.max(6 * S, w * 0.08), 0, 0, Math.PI * 2);
+          c.fill();
+          c.restore();
+        }
+      },
+
+      /**
+       * 主渲染：绘制球体本身、高光点与操作提示气泡。
+       *   - 球体用径向渐变表现立体感：中心偏白、外缘偏黑；
+       *   - 渐变焦点(hx,hy)偏向 _litFrom 光源方向，使亮面朝向光源；
+       *   - 高光点沿同一方向偏移，强化受光效果；
+       *   - _hint 非空时，在球下方绘制橙底提示气泡（优先用 roundRect，
+       *     不支持则回退为直角矩形，做浏览器兼容处理）。
+       */
+      main(el, scene, env) {
+        const c = env.ctx;
+        const S = env.S;
         c.save();
-        c.strokeStyle = hexA(el.color, 0.85);
-        c.lineWidth = 1.8 * S;
-        c.lineCap = 'round';
+
+        // 球体渐变：高光偏向光源方向（无光源时用默认左上 -0.35 偏移）
+        let hx = -0.35, hy = -0.35;
+        if (el._litFrom) {
+          const dx = el._litFrom.x - el.x;
+          const dy = el._litFrom.y - el.y;
+          const d = Math.hypot(dx, dy) || 1;
+          hx = dx / d * 0.5;
+          hy = dy / d * 0.5;
+        }
+        const g = c.createRadialGradient(
+          el.x + hx * el.r, el.y + hy * el.r, el.r * 0.1,
+          el.x, el.y, el.r
+        );
+        g.addColorStop(0, mixHex(el.color, '#ffffff', 0.6));
+        g.addColorStop(0.5, el.color);
+        g.addColorStop(1, mixHex(el.color, '#000000', 0.6));
+        c.fillStyle = g;
         c.beginPath();
-        c.moveTo(el.x + Math.cos(el.angle) * 12 * S, el.y + Math.sin(el.angle) * 12 * S);
-        c.lineTo(ax, ay);
-        c.stroke();
-        const a = el.angle;
-        c.beginPath();
-        c.moveTo(ax + Math.cos(a) * 6 * S, ay + Math.sin(a) * 6 * S);
-        c.lineTo(ax - Math.cos(a) * 2 * S - Math.sin(a) * 4 * S,
-                 ay - Math.sin(a) * 2 * S + Math.cos(a) * 4 * S);
-        c.lineTo(ax - Math.cos(a) * 2 * S + Math.sin(a) * 4 * S,
-                 ay - Math.sin(a) * 2 * S - Math.cos(a) * 4 * S);
-        c.closePath();
-        c.fillStyle = hexA(el.color, 0.85);
+        c.arc(el.x, el.y, el.r, 0, Math.PI * 2);
         c.fill();
+        c.strokeStyle = mixHex(el.color, '#000000', 0.65);
+        c.lineWidth = 2 * S;
+        c.stroke();
+
+        // 高光点（朝光源一侧）
+        c.beginPath();
+        c.arc(el.x + hx * el.r * 0.7, el.y + hy * el.r * 0.7, el.r * 0.22, 0, Math.PI * 2);
+        c.fillStyle = 'rgba(255,255,255,0.75)';
+        c.fill();
+
+        // 提示
+        if (el._hint) {
+          c.font = `bold ${11 * S}px system-ui, sans-serif`;
+          c.textAlign = 'center';
+          c.textBaseline = 'middle';
+          const text = el._hint;
+          const tw = c.measureText(text).width;
+          const pad = 7 * S;
+          const bx = el.x - tw / 2 - pad;
+          const by = el.y + el.r + 8 * S;
+          const bw = tw + pad * 2;
+          const bh = 20 * S;
+          c.fillStyle = 'rgba(255,180,60,0.9)';
+          c.beginPath();
+          // 兼容：支持 roundRect 用圆角，否则回退直角矩形
+          c.roundRect
+            ? c.roundRect(bx, by, bw, bh, 9 * S)
+            : c.rect(bx, by, bw, bh);
+          c.fill();
+          c.fillStyle = '#1a1200';
+          c.fillText(text, el.x, by + bh / 2 + 1);
+        }
+
         c.restore();
       }
     }
